@@ -1,6 +1,8 @@
 package composablejson
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -159,13 +161,12 @@ func (c *call) target(from *node, ref string) (target, error) {
 	if key == d.key {
 		return target{frag: frag}, nil
 	}
-	scheme := strings.ToLower(abs.Scheme)
-	if c.r.local[scheme] != nil {
-		if d.remote {
-			return target{}, errorf(ErrRemoteToLocal, from, "%s was retrieved remotely, so it may not reference %s", d.key, key)
-		}
-	} else if c.r.remote[scheme] == nil && (c.local == nil || key != c.local.key) {
-		return target{}, errorf(ErrUnresolvable, from, "no loader is registered for scheme %q, so %q cannot be followed", scheme, ref)
+	tg := c.r.group(abs)
+	if c.local != nil && key == c.local.key {
+		tg = c.local.group
+	}
+	if err := c.r.checkMove(d.group, d.key, abs, tg, from); err != nil {
+		return target{}, err
 	}
 	d.deps[key] = true
 	return target{uri: abs, frag: frag}, nil
@@ -265,30 +266,55 @@ func (c *call) load(u *url.URL, from *node) (*document, error) {
 	if d, ok := c.r.docs[key]; ok {
 		return d, nil
 	}
-	fail := func(detail string, err error) error {
-		e := &Error{Kind: ErrUnresolvable, Location: Location{URI: key}, Detail: detail, Err: err}
-		if from != nil {
-			e.Location = from.loc()
-		}
-		return e
+	at := Location{URI: key}
+	if from != nil {
+		at = from.loc()
+	}
+	fail := func(kind error, detail string, err error) error {
+		return &Error{Kind: kind, Location: at, Detail: detail, Err: err}
 	}
 	if err := c.ctx.Err(); err != nil {
 		return nil, err
 	}
 	scheme := strings.ToLower(u.Scheme)
-	loader, remote := c.r.local[scheme], false
+	loader, g := c.r.loaders[scheme], c.r.groups[scheme]
 	if loader == nil {
-		loader, remote = c.r.remote[scheme], true
+		return nil, fail(ErrUnresolvable, fmt.Sprintf("no loader is registered for scheme %q", scheme), nil)
 	}
-	if loader == nil {
-		return nil, fail(fmt.Sprintf("no loader is registered for scheme %q", scheme), nil)
+	if c.loaded++; c.loaded > c.r.limits.MaxDocuments {
+		return nil, fail(ErrLimit, fmt.Sprintf("the call loads more than %d documents", c.r.limits.MaxDocuments), nil)
 	}
-	rc, err := loader.Load(c.ctx, u)
+	res, err := loader.Load(context.WithValue(c.ctx, resolverKey{}, c.r), u)
 	if err != nil {
-		return nil, fail("cannot load "+key, err)
+		// A redirect refused by CheckRedirect keeps its own kind.
+		if e := (*Error)(nil); errors.As(err, &e) {
+			cp := *e
+			cp.Location = at
+			return nil, &cp
+		}
+		return nil, fail(ErrUnresolvable, "cannot load "+key, err)
 	}
-	defer rc.Close()
-	d, err := newDocument(u, remote, rc)
+	if res == nil || res.Body == nil {
+		return nil, fail(ErrUnresolvable, "the loader returned no content for "+key, nil)
+	}
+	defer res.Body.Close()
+
+	// A loader that followed a redirect reports where it ended up, which
+	// must obey the same rules as a reference, and becomes the base URI.
+	// The document is still cached under the URI that was requested.
+	final := u
+	if res.URI != nil && res.URI.String() != key {
+		f := *res.URI
+		if !f.IsAbs() || f.Fragment != "" {
+			return nil, fail(ErrUnresolvable, fmt.Sprintf("the loader reported %s, which is not an absolute URI without a fragment", &f), nil)
+		}
+		if err := c.r.checkMove(g, key, &f, c.r.group(&f), from); err != nil {
+			return nil, err
+		}
+		final, g = &f, c.r.group(&f)
+	}
+	max := c.r.limits.MaxBytes
+	d, err := newDocument(final, g, &limitedBody{r: res.Body, key: final.String(), left: max, max: max})
 	if err != nil {
 		return nil, err
 	}

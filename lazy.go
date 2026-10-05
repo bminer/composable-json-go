@@ -1,6 +1,7 @@
 package composablejson
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -309,8 +310,10 @@ func (v *nodeValue) full(c *call) (any, error) {
 		if val, err = t.full(c); err != nil {
 			return nil, err
 		}
-		if v.n.inDefs && hasAnchor(val) {
-			return nil, errorf(ErrAnchorInDefs, v.n, "the value brought into $defs carries an $anchor")
+		if v.n.inDefs {
+			if err := c.checkNoAnchor(val, v.n, "the value brought into $defs"); err != nil {
+				return nil, err
+			}
 		}
 	default:
 		return nil, spliceOutside(v.n)
@@ -369,7 +372,10 @@ func (v *nodeValue) merge(c *call) (*mergeValue, error) {
 		switch x := x.(type) {
 		case nil:
 		case map[string]any:
-			base = combine(base, x)
+			b := c.budget()
+			if base = combine(base, x, b); b.exceeded() {
+				return nil, b.err(v.n)
+			}
 		default:
 			return nil, errorf(ErrExtendType, v.n, "%q resolves to %s", ref, describe(x))
 		}
@@ -411,8 +417,10 @@ func (v *nodeValue) expand(c *call) error {
 			switch x := x.(type) {
 			case nil:
 			case []any:
-				if el.inDefs && hasAnchor(x) {
-					return errorf(ErrAnchorInDefs, el, "an element spliced into $defs carries an $anchor")
+				if el.inDefs {
+					if err := c.checkNoAnchor(x, el, "an element spliced into $defs"); err != nil {
+						return err
+					}
 				}
 				for _, item := range x {
 					elems = append(elems, plain{item})
@@ -748,44 +756,60 @@ func (s *stripped) full(c *call) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.val, s.done = withoutSchema(x), true
+	b := c.budget()
+	if x = withoutSchema(x, b); b.exceeded() {
+		return nil, &Error{Kind: ErrLimit, Detail: fmt.Sprintf("a referenced value holds more than %d values", b.max)}
+	}
+	s.val, s.done = x, true
 	return s.val, nil
 }
 
-// withoutSchema returns v with every $schema key removed, copying only what
-// it must.
-func withoutSchema(v any) any {
+// withoutSchema returns a copy of v with every $schema key removed.
+func withoutSchema(v any, b *budget) any {
+	if !b.spend() {
+		return nil
+	}
 	switch v := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for k, x := range v {
-			if k != "$schema" {
-				out[k] = withoutSchema(x)
+			if k == "$schema" {
+				continue
+			}
+			if out[k] = withoutSchema(x, b); b.exceeded() {
+				return nil
 			}
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, x := range v {
-			out[i] = withoutSchema(x)
+			if out[i] = withoutSchema(x, b); b.exceeded() {
+				return nil
+			}
 		}
 		return out
 	}
 	return v
 }
 
-// combine merges b over a for several $extend references: objects merge
-// recursively, and any other value from b, null included, replaces a's.
+// combine merges y over x for several $extend references: objects merge
+// recursively, and any other value from y, null included, replaces x's.
 // Neither argument is modified.
-func combine(a, b map[string]any) map[string]any {
-	out := maps.Clone(a)
-	for k, bv := range b {
-		am, ok1 := out[k].(map[string]any)
-		bm, ok2 := bv.(map[string]any)
+func combine(x, y map[string]any, b *budget) map[string]any {
+	out := maps.Clone(x)
+	for k, yv := range y {
+		if !b.spend() {
+			return nil
+		}
+		xm, ok1 := out[k].(map[string]any)
+		ym, ok2 := yv.(map[string]any)
 		if ok1 && ok2 {
-			out[k] = combine(am, bm)
+			if out[k] = combine(xm, ym, b); b.exceeded() {
+				return nil
+			}
 		} else {
-			out[k] = bv
+			out[k] = yv
 		}
 	}
 	return out

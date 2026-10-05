@@ -85,30 +85,67 @@ it.
 
 ### Loaders
 
-Documents are loaded by scheme. `Options.Local` holds the loaders that read from
-this machine, and `Options.Remote` those that fetch over a network. A scheme
-with no loader cannot be referenced, and a document loaded remotely may not
-reference a local scheme.
+Documents are loaded by scheme, through loaders registered in one of three
+groups:
 
-| Loader       | Reads                                                                                            |
-| ------------ | ------------------------------------------------------------------------------------------------ |
-| `FileLoader` | `file:` URIs from the OS filesystem, including Windows drive letters and UNC paths               |
-| `FSLoader`   | an `fs.FS`, such as an `embed.FS`, for URIs under a root URI                                     |
-| `HTTPLoader` | `http:` and `https:` with a GET request; non-2xx responses are errors, with an optional size cap |
-| `MapLoader`  | documents in memory, keyed by absolute URI; useful in tests                                      |
-| `LoaderFunc` | anything else                                                                                    |
+| Group              | For schemes that…                              | Default                  |
+| ------------------ | ---------------------------------------------- | ------------------------ |
+| `Options.Local`    | read from this machine, such as `file`         | `{"file": FileLoader{}}` |
+| `Options.Remote`   | fetch with protection in transit, like `https` | none                     |
+| `Options.Insecure` | fetch without it, like `http`                  | none                     |
 
-By default only `file:` is registered. Network access is opt-in:
+A scheme with no loader cannot be referenced. A document may reference, or be
+redirected to, its own group or a more trusted one, never a less trusted one:
+
+| A document from… | may reach Local | may reach Remote | may reach Insecure |
+| ---------------- | :-------------: | :--------------: | :----------------: |
+| Local            |       yes       |       yes        |        yes         |
+| Remote           |       no        |       yes        |         no         |
+| Insecure         |       no        |  yes (upgrade)   |        yes         |
+
+| Loader       | Reads                                                                  |
+| ------------ | ---------------------------------------------------------------------- |
+| `FileLoader` | `file:` URIs from the OS filesystem, optionally confined to `Roots`    |
+| `FSLoader`   | an `fs.FS`, such as an `embed.FS`, for URIs under a root URI           |
+| `HTTPLoader` | `http:` and `https:` with a GET request, optionally limited to `Hosts` |
+| `MapLoader`  | documents in memory, keyed by absolute URI; useful in tests            |
+| `LoaderFunc` | anything else                                                          |
+
+Network access is opt-in:
 
 ```go
 r := composablejson.NewResolver(composablejson.Options{
-	Local:  map[string]composablejson.Loader{"file": composablejson.FileLoader{}},
 	Remote: map[string]composablejson.Loader{"https": composablejson.HTTPLoader{}},
 })
 ```
 
-Setting `Local` replaces the default rather than adding to it, which is why
-`file` is listed again above.
+Setting `Local` replaces the default rather than adding to it, so list `file`
+there if you still want it.
+
+A loader that follows redirects, as `HTTPLoader` does, checks each one with
+`CheckRedirect` before following it and reports where it ended up, which becomes
+the document's base URI. An `https` page that redirects to `http` is refused; an
+`http` page that redirects to `https` is an upgrade, and works when one
+`HTTPLoader` is registered for both.
+
+### Untrusted documents
+
+Resolving a document fetches whatever it references, so a document you did not
+write can ask for more than it appears to. When resolving one:
+
+- **Limit the hosts** a remote document can reach, so it cannot read internal
+  services:
+  `HTTPLoader{Hosts: []string{"cfg.example.com", "*.cdn.example.com"}}`. `Hosts`
+  does not stop a permitted name from resolving to an internal address; a
+  `Client` whose dialer checks addresses does.
+- **Confine local files** to the directories that hold your documents, so `..`
+  and links cannot reach anything else:
+  `FileLoader{Roots: []string{"/srv/config"}}`.
+- **Keep the limits.** `Options.Limits` bounds the documents one call may load
+  (1,000), how deeply resolution may nest (10,000), how many values the output
+  may hold (1,000,000) and the size of each document (64 MiB). A small document
+  can otherwise resolve to an exponentially larger one. Exceeding a limit is an
+  `ErrLimit` error; `composablejson.NoLimit` removes one.
 
 ### Host directives
 

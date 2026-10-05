@@ -5,27 +5,102 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
 )
 
-// Options configures a [Resolver].
+// Options configures a [Resolver]. Loaders are registered by scheme, in one
+// of three groups that say how far a document loaded through them is
+// trusted. A scheme with no loader cannot be referenced at all.
+//
+// A document may reference, or be redirected to, a resource in its own group
+// or a more trusted one, but never a less trusted one: a Remote or Insecure
+// document may not reference a Local resource, and a Remote document may not
+// reference an Insecure one. A Local document may reference anything
+// registered, and an Insecure one may upgrade to Remote.
 type Options struct {
-	// Local holds the loaders for schemes that read from this machine, by
-	// scheme. Nil means {"file": FileLoader{}}; any other value, including an
-	// empty map, replaces that default rather than adding to it.
+	// Local holds the loaders for schemes that read from this machine.
+	// Nil means {"file": FileLoader{}}; any other value, including an empty
+	// map, replaces that default rather than adding to it.
 	Local map[string]Loader
-	// Remote holds the loaders for schemes that fetch over a network, by
-	// scheme. Nil means none, so remote references are errors. A document
-	// loaded through one of these may not reference a Local scheme.
+	// Remote holds the loaders for schemes that fetch over a network with
+	// protection in transit, such as https. Nil means none.
 	Remote map[string]Loader
+	// Insecure holds the loaders for schemes that fetch over a network
+	// without protection in transit, such as http. Nil means none.
+	Insecure map[string]Loader
 	// HostDirectives lists the $-prefixed keys the host format defines, such
 	// as "$csv". The key is left in the output for the host, and its value is
 	// resolved like any other. A name the specification defines, or $id, is
 	// an error.
 	HostDirectives []string
+	// Limits bound the work one call may do.
+	Limits Limits
+}
+
+// Limits bound the work one call to Resolve or ResolveBytes may do, so that
+// a hostile or mistaken document fails with [ErrLimit] rather than
+// exhausting memory or the stack. A zero field means its default, and
+// [NoLimit] means none.
+type Limits struct {
+	// MaxDocuments is how many documents one call may load. Documents
+	// already in the Resolver's cache do not count. The default is 1,000.
+	MaxDocuments int
+	// MaxDepth is how deeply resolution may nest, such as the length of a
+	// chain of $ref nodes that each lead to the next. The default is 10,000.
+	MaxDepth int
+	// MaxValues is how many values, counting every object, array and
+	// scalar, the resolved output may hold. The default is 1,000,000.
+	MaxValues int
+	// MaxBytes is how large each loaded document may be. The default is
+	// 64 MiB.
+	MaxBytes int64
+}
+
+// NoLimit, as a field of [Limits], removes that limit.
+const NoLimit = -1
+
+func (l Limits) resolve() Limits {
+	pick := func(v, def int64) int64 {
+		switch {
+		case v == 0:
+			return def
+		case v < 0:
+			return math.MaxInt64
+		}
+		return v
+	}
+	return Limits{
+		MaxDocuments: int(pick(int64(l.MaxDocuments), 1000)),
+		MaxDepth:     int(pick(int64(l.MaxDepth), 10_000)),
+		MaxValues:    int(pick(int64(l.MaxValues), 1_000_000)),
+		MaxBytes:     pick(l.MaxBytes, 64<<20),
+	}
+}
+
+// group is how far a scheme's documents are trusted, most trusted first.
+type group uint8
+
+const (
+	unregistered group = iota
+	local
+	remote
+	insecure
+)
+
+func (g group) String() string {
+	switch g {
+	case local:
+		return "local"
+	case remote:
+		return "remote"
+	case insecure:
+		return "insecure"
+	}
+	return "unregistered"
 }
 
 // A Resolver resolves documents, caching each document it loads, and the
@@ -35,10 +110,11 @@ type Options struct {
 // A Resolver is safe for concurrent use, though it runs one resolution at a
 // time. Call [Resolver.Reset] when documents change.
 type Resolver struct {
-	local  map[string]Loader
-	remote map[string]Loader
-	host   map[string]bool
-	err    error // the Options were invalid
+	loaders map[string]Loader
+	groups  map[string]group
+	host    map[string]bool
+	limits  Limits
+	err     error // the Options were invalid
 
 	mu   sync.Mutex
 	docs map[string]*document // documents loaded so far, by URI
@@ -55,27 +131,30 @@ var specKeys = map[string]bool{
 // reported by each call to Resolve or ResolveBytes.
 func NewResolver(opts Options) *Resolver {
 	r := &Resolver{
-		local:  lowerKeys(opts.Local),
-		remote: lowerKeys(opts.Remote),
-		host:   map[string]bool{},
-		docs:   map[string]*document{},
+		loaders: map[string]Loader{},
+		groups:  map[string]group{},
+		host:    map[string]bool{},
+		limits:  opts.Limits.resolve(),
+		docs:    map[string]*document{},
 	}
-	if opts.Local == nil {
-		r.local = map[string]Loader{"file": FileLoader{}}
+	localLoaders := opts.Local
+	if localLoaders == nil {
+		localLoaders = map[string]Loader{"file": FileLoader{}}
 	}
-	for _, s := range slices.Sorted(maps.Keys(r.local)) {
-		if r.remote[s] != nil {
-			r.err = fmt.Errorf("composablejson: scheme %q is registered as both local and remote", s)
-		}
-	}
-	for s, l := range r.local {
-		if l == nil {
-			r.err = fmt.Errorf("composablejson: scheme %q has a nil loader", s)
-		}
-	}
-	for s, l := range r.remote {
-		if l == nil {
-			r.err = fmt.Errorf("composablejson: scheme %q has a nil loader", s)
+	for _, reg := range []struct {
+		g       group
+		loaders map[string]Loader
+	}{{local, localLoaders}, {remote, opts.Remote}, {insecure, opts.Insecure}} {
+		g, loaders := reg.g, reg.loaders
+		for _, s := range slices.Sorted(maps.Keys(loaders)) {
+			key := strings.ToLower(s)
+			switch {
+			case loaders[s] == nil:
+				r.err = fmt.Errorf("composablejson: scheme %q has a nil loader", s)
+			case r.groups[key] != unregistered:
+				r.err = fmt.Errorf("composablejson: scheme %q is registered as both %s and %s", s, r.groups[key], g)
+			}
+			r.loaders[key], r.groups[key] = loaders[s], g
 		}
 	}
 	for _, h := range opts.HostDirectives {
@@ -87,13 +166,51 @@ func NewResolver(opts Options) *Resolver {
 	return r
 }
 
-func lowerKeys(m map[string]Loader) map[string]Loader {
-	out := make(map[string]Loader, len(m))
-	for k, v := range m {
-		out[strings.ToLower(k)] = v
+func (r *Resolver) group(u *url.URL) group { return r.groups[strings.ToLower(u.Scheme)] }
+
+// checkMove reports whether a document in group from may reference, or be
+// redirected to, to, in group tg. at is the referencing node, if any, for
+// the error.
+func (r *Resolver) checkMove(from group, fromURI string, to *url.URL, tg group, at *node) error {
+	var kind error
+	switch {
+	case tg == unregistered:
+		kind = ErrUnresolvable
+	case from != local && tg == local:
+		kind = ErrRemoteToLocal
+	case from == remote && tg == insecure:
+		kind = ErrInsecureReference
+	default:
+		return nil
 	}
-	return out
+	if fromURI == "" {
+		fromURI = "the document"
+	}
+	e := errorf(kind, at, "%s (%s) may not reach %s (%s)", fromURI, from, to, tg)
+	if kind == ErrUnresolvable {
+		e.Detail = fmt.Sprintf("no loader is registered for scheme %q, so %s cannot be reached", strings.ToLower(to.Scheme), to)
+	}
+	return e
 }
+
+// CheckRedirect reports whether a [Loader] may follow a redirect, or
+// anything like one, from one URI to another during the load whose context
+// is ctx. It applies the resolver's rules for references: a redirect may not
+// lead to a scheme with no loader, from a remote resource to a local one, or
+// from a Remote resource to an Insecure one. Outside a load, it allows
+// anything.
+func CheckRedirect(ctx context.Context, from, to *url.URL) error {
+	r, _ := ctx.Value(resolverKey{}).(*Resolver)
+	if r == nil {
+		return nil
+	}
+	if !to.IsAbs() {
+		return &Error{Kind: ErrUnresolvable, Detail: fmt.Sprintf("redirect to %s, which is not an absolute URI", to)}
+	}
+	return r.checkMove(r.group(from), from.String(), to, r.group(to), nil)
+}
+
+type resolverKey struct{}
 
 // Resolve loads the document at uri, which must be absolute and have no
 // fragment, and resolves it.
@@ -136,8 +253,16 @@ func (r *Resolver) ResolveBytes(ctx context.Context, data []byte, base *url.URL)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	remote := u != nil && r.local[strings.ToLower(u.Scheme)] == nil
-	d, err := newDocument(u, remote, bytes.NewReader(data))
+	// A document from memory is as trusted as its base URI's scheme. With no
+	// base it is local; with an unregistered scheme, it gets the strictest
+	// rules: those of a Remote document.
+	g := local
+	if u != nil {
+		if g = r.group(u); g == unregistered {
+			g = remote
+		}
+	}
+	d, err := newDocument(u, g, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -223,10 +348,36 @@ type call struct {
 	local  *document // the ResolveBytes document, which is never cached
 	active map[guard]int
 	stack  []guard
+	loaded int // documents loaded so far
 }
 
 func (r *Resolver) newCall(ctx context.Context) *call {
 	return &call{r: r, ctx: ctx, active: map[guard]int{}}
+}
+
+// A budget counts the values one traversal of a resolved value visits.
+// Resolved values share structure, so a small document can resolve to one
+// whose full traversal is exponentially large; every traversal that copies
+// or scans a whole value therefore stops at MaxValues.
+type budget struct {
+	left int
+	max  int
+}
+
+func (c *call) budget() *budget {
+	return &budget{left: c.r.limits.MaxValues, max: c.r.limits.MaxValues}
+}
+
+// spend counts one value, and reports whether the budget allows it.
+func (b *budget) spend() bool {
+	b.left--
+	return b.left >= 0
+}
+
+func (b *budget) exceeded() bool { return b.left < 0 }
+
+func (b *budget) err(n *node) *Error {
+	return errorf(ErrLimit, n, "the resolved value holds more than %d values", b.max)
 }
 
 func (c *call) state(d *document) *docState {
@@ -374,6 +525,9 @@ func (c *call) enter(g guard) error {
 	if err := c.ctx.Err(); err != nil {
 		return err
 	}
+	if len(c.stack) >= c.r.limits.MaxDepth {
+		return &Error{Kind: ErrLimit, Location: g.loc(), Detail: fmt.Sprintf("resolution nests more than %d levels deep", c.r.limits.MaxDepth)}
+	}
 	c.active[g] = len(c.stack)
 	c.stack = append(c.stack, g)
 	return nil
@@ -392,7 +546,8 @@ func (c *call) resolveRoot(d *document) (*Document, error) {
 	}
 	anchors := map[string]Pointer{}
 	var dup *Error
-	scanAnchors(v, nil, func(name string, p Pointer) bool {
+	b := c.budget()
+	scanAnchors(v, nil, b, func(name string, p Pointer) bool {
 		prev, ok := anchors[name]
 		if !ok {
 			anchors[name] = p
@@ -413,7 +568,15 @@ func (c *call) resolveRoot(d *document) (*Document, error) {
 	if dup != nil {
 		return nil, dup
 	}
-	doc := &Document{Value: deepCopy(v), anchors: anchors}
+	if b.exceeded() {
+		return nil, b.err(d.root)
+	}
+	b = c.budget()
+	out := deepCopy(v, b)
+	if b.exceeded() {
+		return nil, b.err(d.root)
+	}
+	doc := &Document{Value: out, anchors: anchors}
 	if d.uri != nil {
 		u := *d.uri
 		doc.URI = &u

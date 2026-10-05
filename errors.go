@@ -21,9 +21,14 @@ var (
 	// ErrMissingBaseURI reports a relative reference in a document that has
 	// no base URI.
 	ErrMissingBaseURI = errors.New("relative reference without a base URI")
-	// ErrRemoteToLocal reports a remote document that references a local
-	// resource.
+	// ErrRemoteToLocal reports a remote document that references, or is
+	// redirected to, a local resource.
 	ErrRemoteToLocal = errors.New("remote document references a local resource")
+	// ErrInsecureReference reports a document retrieved with protection in
+	// transit that references, or is redirected to, a resource retrieved
+	// without it: an Options.Remote document referencing an
+	// Options.Insecure one.
+	ErrInsecureReference = errors.New("secure document references an insecure resource")
 	// ErrCycle reports a node that is needed while it is still being
 	// resolved.
 	ErrCycle = errors.New("reference cycle")
@@ -52,6 +57,10 @@ var (
 	// ErrUnknownDirective reports a $-prefixed key defined by neither the
 	// specification nor the host format.
 	ErrUnknownDirective = errors.New("unknown directive")
+	// ErrLimit reports that resolution exceeded one of its [Limits]. The
+	// specification leaves limits to implementations, so it lists no such
+	// error.
+	ErrLimit = errors.New("limit exceeded")
 )
 
 // Error describes a failure to resolve a document.

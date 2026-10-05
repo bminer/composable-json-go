@@ -68,10 +68,10 @@ func (n *node) loc() Location { return Location{URI: n.doc.key, Pointer: n.point
 // A document is one parsed JSON document. Its tree never changes; the lazily
 // resolved values in lazy are cached separately, so they can be discarded.
 type document struct {
-	uri    *url.URL // nil for a document with no base URI
-	key    string   // uri.String(), or ""
-	remote bool
-	root   *node
+	uri   *url.URL // nil for a document with no base URI
+	key   string   // uri.String(), or ""
+	group group
+	root  *node
 
 	written    map[string][]*node // nodes declaring each valid $anchor name
 	directives []*node            // nodes with $ref, $extend(s) or $splice, in source order
@@ -80,8 +80,8 @@ type document struct {
 	lazy *docState
 }
 
-func newDocument(u *url.URL, remote bool, rd io.Reader) (*document, error) {
-	d := &document{uri: u, remote: remote, written: map[string][]*node{}, deps: map[string]bool{}}
+func newDocument(u *url.URL, g group, rd io.Reader) (*document, error) {
+	d := &document{uri: u, group: g, written: map[string][]*node{}, deps: map[string]bool{}}
 	if u != nil {
 		d.key = u.String()
 	}
@@ -169,6 +169,9 @@ func parse(d *document, r io.Reader) (*node, error) {
 
 func (p *parser) fail(err error) error {
 	if p.rd.err != nil {
+		if e, ok := p.rd.err.(*Error); ok {
+			return e // the document is too large
+		}
 		return &Error{Kind: ErrUnresolvable, Location: Location{URI: p.doc.key}, Detail: "cannot read the document", Err: p.rd.err}
 	}
 	if err == io.EOF {

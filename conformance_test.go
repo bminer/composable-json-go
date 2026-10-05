@@ -31,6 +31,7 @@ var errorKinds = map[string]error{
 	"unresolvable-reference":  composablejson.ErrUnresolvable,
 	"missing-base-uri":        composablejson.ErrMissingBaseURI,
 	"remote-to-local":         composablejson.ErrRemoteToLocal,
+	"insecure-reference":      composablejson.ErrInsecureReference,
 	"cycle":                   composablejson.ErrCycle,
 	"duplicate-anchor":        composablejson.ErrDuplicateAnchor,
 	"anchor-in-defs":          composablejson.ErrAnchorInDefs,
@@ -112,7 +113,8 @@ func runCase(t *testing.T, tc suiteCase) {
 		HostDirectives: tc.Options.HostDirectives,
 	}
 	if tc.Options.Remote {
-		opts.Remote = map[string]composablejson.Loader{"http": docs, "https": docs}
+		opts.Remote = map[string]composablejson.Loader{"https": docs}
+		opts.Insecure = map[string]composablejson.Loader{"http": docs}
 	}
 	var doc *composablejson.Document
 	var err error

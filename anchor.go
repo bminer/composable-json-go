@@ -121,9 +121,10 @@ func (c *call) collectImports(found map[string][]candidate, dn *node, cl class, 
 	if err != nil {
 		return err
 	}
+	b := c.budget()
 	collect := func(at value, v any, loc Location, id string) error {
 		var err error
-		scanAnchors(v, nil, func(name string, p Pointer) bool {
+		scanAnchors(v, nil, b, func(name string, p Pointer) bool {
 			n, ok, e := c.walk(at, p)
 			if e == nil && ok {
 				var got string
@@ -147,6 +148,9 @@ func (c *call) collectImports(found map[string][]candidate, dn *node, cl class, 
 			}
 			return true
 		})
+		if err == nil && b.exceeded() {
+			err = b.err(dn)
+		}
 		return err
 	}
 	if cl == cSplice {
@@ -187,22 +191,25 @@ func anchorName(c *call, v value) (string, error) {
 }
 
 // scanAnchors calls fn with the name and position of every object in v that
-// carries an $anchor, in a fixed order, until fn returns false. It reports
-// whether the scan finished.
-func scanAnchors(v any, p Pointer, fn func(name string, p Pointer) bool) bool {
+// carries an $anchor, in a fixed order, until fn returns false or b runs out.
+// It reports whether the scan finished.
+func scanAnchors(v any, p Pointer, b *budget, fn func(name string, p Pointer) bool) bool {
+	if !b.spend() {
+		return false
+	}
 	switch v := v.(type) {
 	case map[string]any:
 		if s, ok := v["$anchor"].(string); ok && !fn(s, slices.Clone(p)) {
 			return false
 		}
 		for _, k := range slices.Sorted(maps.Keys(v)) {
-			if !scanAnchors(v[k], append(p, k), fn) {
+			if !scanAnchors(v[k], append(p, k), b, fn) {
 				return false
 			}
 		}
 	case []any:
 		for i, x := range v {
-			if !scanAnchors(x, append(p, strconv.Itoa(i)), fn) {
+			if !scanAnchors(x, append(p, strconv.Itoa(i)), b, fn) {
 				return false
 			}
 		}
@@ -210,6 +217,20 @@ func scanAnchors(v any, p Pointer, fn func(name string, p Pointer) bool) bool {
 	return true
 }
 
-func hasAnchor(v any) bool {
-	return !scanAnchors(v, nil, func(string, Pointer) bool { return false })
+// checkNoAnchor reports an error if v, brought into $defs at n, carries an
+// $anchor.
+func (c *call) checkNoAnchor(v any, n *node, what string) error {
+	b := c.budget()
+	found := false
+	scanAnchors(v, nil, b, func(string, Pointer) bool {
+		found = true
+		return false
+	})
+	switch {
+	case found:
+		return errorf(ErrAnchorInDefs, n, "%s carries an $anchor", what)
+	case b.exceeded():
+		return b.err(n)
+	}
+	return nil
 }

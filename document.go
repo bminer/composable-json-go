@@ -34,18 +34,27 @@ func (d *Document) Anchors() map[string]Pointer {
 	return out
 }
 
-func deepCopy(v any) any {
+// deepCopy copies v, stopping early, with b exceeded, once it has copied
+// more values than b allows.
+func deepCopy(v any, b *budget) any {
+	if !b.spend() {
+		return nil
+	}
 	switch v := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for k, x := range v {
-			out[k] = deepCopy(x)
+			if out[k] = deepCopy(x, b); b.exceeded() {
+				return nil
+			}
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, x := range v {
-			out[i] = deepCopy(x)
+			if out[i] = deepCopy(x, b); b.exceeded() {
+				return nil
+			}
 		}
 		return out
 	}

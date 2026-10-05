@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"net/url"
 	"strings"
@@ -39,7 +38,7 @@ type countingLoader struct {
 	loads map[string]int
 }
 
-func (l *countingLoader) Load(ctx context.Context, u *url.URL) (io.ReadCloser, error) {
+func (l *countingLoader) Load(ctx context.Context, u *url.URL) (*composablejson.Resource, error) {
 	l.mu.Lock()
 	if l.loads == nil {
 		l.loads = map[string]int{}

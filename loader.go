@@ -3,6 +3,7 @@ package composablejson
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,27 +16,50 @@ import (
 )
 
 // A Loader retrieves documents. Load is called with an absolute URI that has
-// no fragment, and returns the document's content; the resolver closes it.
-// A Loader does not parse documents or follow references, and it is only
-// called for the scheme it is registered under in [Options].
+// no fragment, and only for a scheme the Loader is registered under in
+// [Options]. A Loader does not parse documents or follow references.
+//
+// A Loader that follows redirects, or anything like them, should call
+// [CheckRedirect] before each one, and report where it ended up in
+// [Resource.URI].
 type Loader interface {
-	Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error)
+	Load(ctx context.Context, uri *url.URL) (*Resource, error)
+}
+
+// Resource is a loaded document.
+type Resource struct {
+	// Body is the document's content. The resolver closes it.
+	Body io.ReadCloser
+	// URI is where the content came from, if not the URI requested: after
+	// a redirect, say. It becomes the document's base URI. Nil means the
+	// URI requested.
+	URI *url.URL
 }
 
 // LoaderFunc adapts a function to a [Loader].
-type LoaderFunc func(ctx context.Context, uri *url.URL) (io.ReadCloser, error)
+type LoaderFunc func(ctx context.Context, uri *url.URL) (*Resource, error)
 
 // Load calls f.
-func (f LoaderFunc) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error) {
+func (f LoaderFunc) Load(ctx context.Context, uri *url.URL) (*Resource, error) {
 	return f(ctx, uri)
 }
 
 // FileLoader reads file URIs from the local filesystem, converting each to a
 // native path with [FilePath].
-type FileLoader struct{}
+type FileLoader struct {
+	// Roots lists the directories files may be read from. A file outside
+	// them cannot be read, and neither can one reached through "..", or
+	// through a symbolic link or junction that leads outside them. Nil
+	// means any file.
+	Roots []string
+}
+
+// ErrOutsideRoots is returned by a [FileLoader] for a file outside its
+// Roots.
+var ErrOutsideRoots = errors.New("file is outside the loader's roots")
 
 // Load opens the file uri names.
-func (FileLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error) {
+func (l FileLoader) Load(ctx context.Context, uri *url.URL) (*Resource, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -43,20 +67,48 @@ func (FileLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error)
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(p)
+	if l.Roots == nil {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+		return &Resource{Body: f}, nil
+	}
+	for _, root := range l.Roots {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(abs, p)
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		// os.Root refuses any path, including one through a link, that
+		// leads outside the root.
+		r, err := os.OpenRoot(abs)
+		if err != nil {
+			return nil, err
+		}
+		f, err := r.Open(rel)
+		r.Close()
+		if err != nil {
+			return nil, err
+		}
+		return &Resource{Body: f}, nil
+	}
+	return nil, &fs.PathError{Op: "open", Path: p, Err: ErrOutsideRoots}
 }
 
-// FSLoader reads documents from an [fs.FS], such as an embed.FS or the result
-// of os.DirFS. A URI under Root names the file at the rest of its path: with
-// Root file:///srv/app/, file:///srv/app/cfg/a.json is "cfg/a.json". Any
-// other URI does not exist.
+// FSLoader reads documents from an [fs.FS], such as an embed.FS. A URI under
+// Root names the file at the rest of its path: with Root file:///srv/app/,
+// file:///srv/app/cfg/a.json is "cfg/a.json". Any other URI does not exist.
 type FSLoader struct {
 	FS   fs.FS
 	Root *url.URL
 }
 
 // Load opens the file uri names within l.FS.
-func (l FSLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error) {
+func (l FSLoader) Load(ctx context.Context, uri *url.URL) (*Resource, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -64,7 +116,11 @@ func (l FSLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error)
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: uri.String(), Err: fs.ErrNotExist}
 	}
-	return l.FS.Open(name)
+	f, err := l.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &Resource{Body: f}, nil
 }
 
 func (l FSLoader) name(uri *url.URL) (string, bool) {
@@ -83,23 +139,54 @@ func (l FSLoader) name(uri *url.URL) (string, bool) {
 }
 
 // HTTPLoader fetches http and https URIs with a GET request. A response
-// whose status is not 2xx is an error, and so is a body longer than MaxBytes,
-// when MaxBytes is positive.
+// whose status is not 2xx is an error.
 //
-// Relative references in a fetched document resolve against the URI that
-// was requested, even when the server redirects.
+// It follows redirects, checking each with [CheckRedirect] and against
+// Hosts before it is followed, so a redirect never downgrades https to http,
+// and it reports the URI it ended up at, which becomes the document's base
+// URI.
 type HTTPLoader struct {
-	// Client sends the requests. Nil means http.DefaultClient.
+	// Client sends the requests. Nil means http.DefaultClient. A
+	// CheckRedirect it sets runs after HTTPLoader's own checks.
 	Client *http.Client
-	// MaxBytes limits the size of a document. Zero means no limit.
-	MaxBytes int64
+	// Hosts lists the hosts that may be fetched, checked on the first
+	// request and on every redirect. An entry "*.example.com" matches any
+	// subdomain of example.com. Ports are ignored. Nil means any host.
+	//
+	// Hosts does not stop a permitted name from resolving to an internal
+	// address; a Client whose dialer checks addresses can.
+	Hosts []string
 }
 
+// ErrHostNotAllowed is returned by an [HTTPLoader] for a host not in its
+// Hosts.
+var ErrHostNotAllowed = errors.New("host is not in the loader's Hosts")
+
 // Load fetches uri.
-func (l HTTPLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, error) {
-	client := l.Client
-	if client == nil {
-		client = http.DefaultClient
+func (l HTTPLoader) Load(ctx context.Context, uri *url.URL) (*Resource, error) {
+	if !l.allowed(uri) {
+		return nil, fmt.Errorf("GET %s: %w", uri, ErrHostNotAllowed)
+	}
+	base := l.Client
+	if base == nil {
+		base = http.DefaultClient
+	}
+	client := *base
+	next := base.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := CheckRedirect(req.Context(), via[len(via)-1].URL, req.URL); err != nil {
+			return err
+		}
+		if !l.allowed(req.URL) {
+			return ErrHostNotAllowed
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri.String(), nil)
 	if err != nil {
@@ -114,28 +201,31 @@ func (l HTTPLoader) Load(ctx context.Context, uri *url.URL) (io.ReadCloser, erro
 		resp.Body.Close()
 		return nil, fmt.Errorf("GET %s: %s", uri, resp.Status)
 	}
-	if l.MaxBytes > 0 {
-		return &limitedBody{ReadCloser: resp.Body, left: l.MaxBytes, max: l.MaxBytes}, nil
+	res := &Resource{Body: resp.Body}
+	if final := resp.Request.URL; final.String() != uri.String() {
+		u := *final
+		u.Fragment, u.RawFragment = "", ""
+		res.URI = &u
 	}
-	return resp.Body, nil
+	return res, nil
 }
 
-// limitedBody fails, rather than stopping silently, once more than max bytes
-// have been read.
-type limitedBody struct {
-	io.ReadCloser
-	left, max int64
-}
-
-func (b *limitedBody) Read(p []byte) (int, error) {
-	if int64(len(p)) > b.left+1 {
-		p = p[:b.left+1]
+func (l HTTPLoader) allowed(u *url.URL) bool {
+	if l.Hosts == nil {
+		return true
 	}
-	n, err := b.ReadCloser.Read(p)
-	if b.left -= int64(n); b.left < 0 {
-		return 0, fmt.Errorf("document exceeds %d bytes", b.max)
+	host := strings.ToLower(u.Hostname())
+	for _, h := range l.Hosts {
+		h = strings.ToLower(h)
+		if parent, ok := strings.CutPrefix(h, "*."); ok {
+			if strings.HasSuffix(host, "."+parent) {
+				return true
+			}
+		} else if host == h {
+			return true
+		}
 	}
-	return n, err
+	return false
 }
 
 // MapLoader serves documents from memory, keyed by absolute URI in the form
@@ -144,12 +234,33 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 type MapLoader map[string][]byte
 
 // Load returns the document stored under uri.
-func (m MapLoader) Load(_ context.Context, uri *url.URL) (io.ReadCloser, error) {
+func (m MapLoader) Load(_ context.Context, uri *url.URL) (*Resource, error) {
 	data, ok := m[uri.String()]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: uri.String(), Err: fs.ErrNotExist}
 	}
-	return io.NopCloser(bytes.NewReader(data)), nil
+	return &Resource{Body: io.NopCloser(bytes.NewReader(data))}, nil
+}
+
+// limitedBody fails, rather than stopping silently, once more than max bytes
+// have been read.
+type limitedBody struct {
+	r         io.Reader
+	key       string
+	left, max int64
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if int64(len(p)) > b.left {
+		// Read one byte past the limit, to tell a document of exactly max
+		// bytes from a longer one.
+		p = p[:b.left+1]
+	}
+	n, err := b.r.Read(p)
+	if b.left -= int64(n); b.left < 0 {
+		return 0, &Error{Kind: ErrLimit, Location: Location{URI: b.key}, Detail: fmt.Sprintf("the document exceeds %d bytes", b.max)}
+	}
+	return n, err
 }
 
 // FilePath converts a file URI to a native path. On Windows,
