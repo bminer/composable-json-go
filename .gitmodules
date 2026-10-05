@@ -1,0 +1,3 @@
+[submodule "testdata/composable-json"]
+	path = testdata/composable-json
+	url = ../composable-json.git
