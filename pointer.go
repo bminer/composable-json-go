@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Pointer is a parsed JSON Pointer (RFC 6901), with one unescaped token per
@@ -93,6 +94,9 @@ func ParseFragment(s string) (Fragment, error) {
 
 // parseFragment parses a fragment whose percent-encoding is already decoded.
 func parseFragment(f string) (Fragment, error) {
+	if !utf8.ValidString(f) {
+		return Fragment{}, &Error{Kind: ErrMalformedDirective, Detail: "fragment " + strconv.Quote(f) + " is not UTF-8 once percent-decoded"}
+	}
 	if f == "" || f[0] == '/' {
 		p, err := ParsePointer(f)
 		return Fragment{Pointer: p}, err

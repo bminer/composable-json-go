@@ -44,16 +44,16 @@ func (n *node) classify() (class, error) {
 	_, hasExtends := n.obj["$extends"]
 	switch {
 	case hasRef:
-		if len(n.keys) > 1 {
-			return 0, errorf(ErrSiblingKeys, n, "$ref allows no other key, but the object also has %s", others(n, "$ref"))
+		if err := n.checkSiblings("$ref"); err != nil {
+			return 0, err
 		}
 		if _, ok := ref.val.(string); !ok {
 			return 0, errorf(ErrMalformedDirective, ref, "$ref must be a reference string")
 		}
 		return cRef, nil
 	case hasSplice:
-		if len(n.keys) > 1 {
-			return 0, errorf(ErrSiblingKeys, n, "$splice allows no other key, but the object also has %s", others(n, "$splice"))
+		if err := n.checkSiblings("$splice"); err != nil {
+			return 0, err
 		}
 		if _, err := n.refList("$splice"); err != nil {
 			return 0, err
@@ -70,14 +70,25 @@ func (n *node) classify() (class, error) {
 	return cPlain, nil
 }
 
-func others(n *node, except string) string {
-	var ks []string
+// checkSiblings reports an error for any key of n beside directive other
+// than a string $comment, which explains the reference and is dropped with
+// the node.
+func (n *node) checkSiblings(directive string) error {
+	var others []string
 	for _, k := range n.keys {
-		if k != except {
-			ks = append(ks, strconv.Quote(k))
+		if k != directive && k != "$comment" {
+			others = append(others, strconv.Quote(k))
 		}
 	}
-	return strings.Join(ks, ", ")
+	if len(others) > 0 {
+		return errorf(ErrSiblingKeys, n, "%s allows no other key but $comment, but the object also has %s", directive, strings.Join(others, ", "))
+	}
+	if c, ok := n.obj["$comment"]; ok {
+		if _, ok := c.val.(string); !ok {
+			return errorf(ErrMalformedDirective, c, "$comment must be a string")
+		}
+	}
+	return nil
 }
 
 func (n *node) extendKey() string {
@@ -204,10 +215,8 @@ func (c *call) reference(from *node, ref string) (value, error) {
 	if !found {
 		return nil, errorf(ErrUnresolvable, from, "%q selects nothing", ref)
 	}
-	if d != from.doc {
-		v = strip(v)
-	}
-	return v, nil
+	// A reference never delivers $schema, whichever document it points into.
+	return strip(v), nil
 }
 
 // walk follows p from v through resolved values, resolving only what each

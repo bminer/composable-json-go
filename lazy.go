@@ -310,11 +310,6 @@ func (v *nodeValue) full(c *call) (any, error) {
 		if val, err = t.full(c); err != nil {
 			return nil, err
 		}
-		if v.n.inDefs {
-			if err := c.checkNoAnchor(val, v.n, "the value brought into $defs"); err != nil {
-				return nil, err
-			}
-		}
 	default:
 		return nil, spliceOutside(v.n)
 	}
@@ -417,11 +412,6 @@ func (v *nodeValue) expand(c *call) error {
 			switch x := x.(type) {
 			case nil:
 			case []any:
-				if el.inDefs {
-					if err := c.checkNoAnchor(x, el, "an element spliced into $defs"); err != nil {
-						return err
-					}
-				}
 				for _, item := range x {
 					elems = append(elems, plain{item})
 				}
@@ -701,8 +691,7 @@ func (e *extendPatch) length(*call) (int, error)       { return 0, nil }
 func (e *extendPatch) index(*call, int) (value, error) { return absent, nil }
 func (e *extendPatch) full(c *call) (any, error)       { return e.v.full(c) }
 
-// stripped is a value referenced from another document, which never
-// carries a $schema.
+// stripped is a value a reference delivers, which never carries a $schema.
 type stripped struct {
 	inner value
 	val   any

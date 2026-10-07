@@ -34,8 +34,8 @@ type Options struct {
 	Insecure map[string]Loader
 	// HostDirectives lists the $-prefixed keys the host format defines, such
 	// as "$csv". The key is left in the output for the host, and its value is
-	// resolved like any other. A name the specification defines, or $id, is
-	// an error.
+	// resolved like any other. A name the specification defines or
+	// reserves, such as $id or $literal, is an error.
 	HostDirectives []string
 	// Limits bound the work one call may do.
 	Limits Limits
@@ -124,7 +124,7 @@ type Resolver struct {
 // format may not take.
 var specKeys = map[string]bool{
 	"$ref": true, "$extend": true, "$extends": true, "$splice": true, "$anchor": true,
-	"$defs": true, "$comment": true, "$schema": true, "$id": true,
+	"$defs": true, "$comment": true, "$schema": true, "$id": true, "$literal": true,
 }
 
 // NewResolver returns a Resolver configured by opts. Invalid options are
@@ -459,11 +459,16 @@ func (c *call) checkKey(n *node, k string) error {
 	}
 	switch k {
 	case "$anchor":
-		if s, ok := ch.val.(string); !ok || !validAnchor(s) {
-			return errorf(ErrMalformedDirective, ch, "$anchor must be a name matching ^[A-Za-z_][-A-Za-z0-9._]*$")
+		if ch.kind == scalarNode && ch.val == nil {
+			// A null $anchor removes an imported name, so it is allowed
+			// exactly where a written null deletes.
+			if !ch.patch {
+				return errorf(ErrMalformedDirective, ch, "a null $anchor is allowed only under an $extend node, outside any array")
+			}
+			return nil
 		}
-		if n.inDefs {
-			return errorf(ErrAnchorInDefs, n, "$anchor is not allowed inside $defs")
+		if s, ok := ch.val.(string); !ok || !validAnchor(s) {
+			return errorf(ErrMalformedDirective, ch, "$anchor must be a name matching ^[A-Za-z_][-A-Za-z0-9._]*$, or null to remove one")
 		}
 	case "$comment", "$schema":
 		if _, ok := ch.val.(string); !ok {

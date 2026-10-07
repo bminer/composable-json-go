@@ -37,8 +37,6 @@ type node struct {
 	// references: a key of an $extend node's own keys, or a key of a plain
 	// object that is itself one. A null written there deletes.
 	patch bool
-	// inDefs is set for a node inside $defs.
-	inDefs bool
 
 	classified bool
 	cls        class
@@ -95,7 +93,7 @@ func newDocument(u *url.URL, g group, rd io.Reader) (*document, error) {
 }
 
 // annotate records written anchors and directives, and sets each node's
-// patch and inDefs flags.
+// patch flag.
 func (d *document) annotate(n *node) {
 	switch n.kind {
 	case objectNode:
@@ -115,13 +113,11 @@ func (d *document) annotate(n *node) {
 		}
 		for _, k := range n.keys {
 			c := n.obj[k]
-			c.inDefs = n.inDefs || k == "$defs"
 			c.patch = extend && k != "$extend" && k != "$extends" || n.patch && plain
 			d.annotate(c)
 		}
 	case arrayNode:
 		for _, c := range n.arr {
-			c.inDefs = n.inDefs
 			d.annotate(c)
 		}
 	}

@@ -13,9 +13,6 @@ func (c *call) anchor(d *document, name string, from *node) (value, error) {
 	switch ns := d.written[name]; len(ns) {
 	case 0:
 	case 1:
-		if ns[0].inDefs {
-			return nil, errorf(ErrAnchorInDefs, ns[0], "$anchor %q is inside $defs", name)
-		}
 		return c.position(ns[0])
 	default:
 		return nil, &Error{
@@ -33,9 +30,6 @@ func (c *call) anchor(d *document, name string, from *node) (value, error) {
 	case 0:
 		return nil, errorf(ErrUnresolvable, from, "no anchor %q in %s", name, displayURI(d))
 	case 1:
-		if cs[0].inDefs {
-			return nil, &Error{Kind: ErrAnchorInDefs, Location: cs[0].loc, Detail: fmt.Sprintf("$anchor %q is brought into $defs", name)}
-		}
 		return cs[0].v, nil
 	default:
 		return nil, &Error{
@@ -57,10 +51,9 @@ func displayURI(d *document) string {
 // A candidate is a node that an import brings into a document with an
 // anchor.
 type candidate struct {
-	v      value    // the node's value at its position in the document
-	loc    Location // the directive that imports it
-	id     string   // distinguishes nodes; equal for one node imported twice
-	inDefs bool
+	v   value    // the node's value at its position in the document
+	loc Location // the directive that imports it
+	id  string   // distinguishes nodes; equal for one node imported twice
 }
 
 // imports resolves every reference in d to another document, deferring those
@@ -139,7 +132,7 @@ func (c *call) collectImports(found map[string][]candidate, dn *node, cl class, 
 				// The document's own keys replaced the imported node.
 				return true
 			}
-			cd := candidate{v: n, loc: loc, id: id + p.String(), inDefs: dn.inDefs}
+			cd := candidate{v: n, loc: loc, id: id + p.String()}
 			if cd.loc.Pointer == nil {
 				cd.loc.Pointer = append(dn.pointer(), p...)
 			}
@@ -215,22 +208,4 @@ func scanAnchors(v any, p Pointer, b *budget, fn func(name string, p Pointer) bo
 		}
 	}
 	return true
-}
-
-// checkNoAnchor reports an error if v, brought into $defs at n, carries an
-// $anchor.
-func (c *call) checkNoAnchor(v any, n *node, what string) error {
-	b := c.budget()
-	found := false
-	scanAnchors(v, nil, b, func(string, Pointer) bool {
-		found = true
-		return false
-	})
-	switch {
-	case found:
-		return errorf(ErrAnchorInDefs, n, "%s carries an $anchor", what)
-	case b.exceeded():
-		return b.err(n)
-	}
-	return nil
 }

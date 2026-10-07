@@ -34,8 +34,6 @@ var (
 	ErrCycle = errors.New("reference cycle")
 	// ErrDuplicateAnchor reports two nodes carrying the same $anchor.
 	ErrDuplicateAnchor = errors.New("duplicate $anchor")
-	// ErrAnchorInDefs reports an $anchor inside $defs.
-	ErrAnchorInDefs = errors.New("$anchor inside $defs")
 	// ErrExtendType reports an $extend reference to a value that is neither
 	// an object nor null.
 	ErrExtendType = errors.New("$extend target is neither an object nor null")
@@ -45,7 +43,8 @@ var (
 	// ErrSplicePosition reports $splice on an object that is not an element
 	// of an array.
 	ErrSplicePosition = errors.New("$splice outside an array")
-	// ErrSiblingKeys reports a key alongside $ref or $splice.
+	// ErrSiblingKeys reports a key other than $comment alongside $ref or
+	// $splice.
 	ErrSiblingKeys = errors.New("key alongside $ref or $splice")
 	// ErrExtendSynonym reports a node with both $extend and $extends.
 	ErrExtendSynonym = errors.New("both $extend and $extends")

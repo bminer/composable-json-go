@@ -34,7 +34,6 @@ var errorKinds = map[string]error{
 	"insecure-reference":      composablejson.ErrInsecureReference,
 	"cycle":                   composablejson.ErrCycle,
 	"duplicate-anchor":        composablejson.ErrDuplicateAnchor,
-	"anchor-in-defs":          composablejson.ErrAnchorInDefs,
 	"extend-type":             composablejson.ErrExtendType,
 	"splice-type":             composablejson.ErrSpliceType,
 	"splice-position":         composablejson.ErrSplicePosition,
