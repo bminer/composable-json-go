@@ -1,3 +1,3 @@
-[submodule "testdata/composable-json"]
-	path = testdata/composable-json
-	url = ../composable-json.git
+[submodule "composable-json"]
+	path = composable-json
+	url = https://github.com/bminer/composable-json.git

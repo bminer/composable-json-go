@@ -15,14 +15,14 @@ import (
 )
 
 // The conformance suite comes from the specification repository, which is a
-// submodule at testdata/composable-json. COMPOSABLE_JSON_SUITE points the
+// submodule at composable-json. COMPOSABLE_JSON_SUITE points the
 // tests at another copy of its tests directory, such as a working tree of the
 // specification.
 func suiteDir() string {
 	if dir := os.Getenv("COMPOSABLE_JSON_SUITE"); dir != "" {
 		return dir
 	}
-	return filepath.Join("testdata", "composable-json", "tests")
+	return filepath.Join("composable-json", "tests")
 }
 
 var errorKinds = map[string]error{

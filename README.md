@@ -30,19 +30,20 @@ documents every type and function, with runnable examples.
 go get github.com/bminer/composable-json-go
 ```
 
-The package is called `composablejson`. It needs Go 1.26 or later and has no
-dependencies beyond the standard library.
+The package is called `composablejson`; the examples below import it as
+`compjson`. It needs Go 1.26 or later and has no dependencies beyond the
+standard library.
 
 ## Usage
 
 ```go
-import composablejson "github.com/bminer/composable-json-go"
+import compjson "github.com/bminer/composable-json-go"
 
-u, err := composablejson.FileURI("config/staging.json")
+u, err := compjson.FileURI("config/staging.json")
 if err != nil {
 	return err
 }
-doc, err := composablejson.Resolve(ctx, u, composablejson.Options{})
+doc, err := compjson.Resolve(ctx, u, compjson.Options{})
 if err != nil {
 	return err
 }
@@ -60,7 +61,7 @@ where its relative references point; with a nil base, only `#...` and absolute
 references work.
 
 ```go
-doc, err := composablejson.ResolveBytes(ctx, data, base, composablejson.Options{})
+doc, err := compjson.ResolveBytes(ctx, data, base, compjson.Options{})
 ```
 
 ### Resolving many documents
@@ -70,9 +71,9 @@ across calls. A test runner whose cases all extend the same setup and teardown
 documents reads, parses and resolves those once.
 
 ```go
-r := composablejson.NewResolver(composablejson.Options{})
+r := compjson.NewResolver(compjson.Options{})
 for _, path := range testFiles {
-	u, _ := composablejson.FileURI(path)
+	u, _ := compjson.FileURI(path)
 	doc, err := r.Resolve(ctx, u)
 	// ...
 }
@@ -114,8 +115,8 @@ redirected to, its own group or a more trusted one, never a less trusted one:
 Network access is opt-in:
 
 ```go
-r := composablejson.NewResolver(composablejson.Options{
-	Remote: map[string]composablejson.Loader{"https": composablejson.HTTPLoader{}},
+r := compjson.NewResolver(compjson.Options{
+	Remote: map[string]compjson.Loader{"https": compjson.HTTPLoader{}},
 })
 ```
 
@@ -145,7 +146,7 @@ write can ask for more than it appears to. When resolving one:
   (1,000), how deeply resolution may nest (10,000), how many values the output
   may hold (1,000,000) and the size of each document (64 MiB). A small document
   can otherwise resolve to an exponentially larger one. Exceeding a limit is an
-  `ErrLimit` error; `composablejson.NoLimit` removes one.
+  `ErrLimit` error; `compjson.NoLimit` removes one.
 
 ### Host directives
 
@@ -154,7 +155,7 @@ and they are left in the output for the host to act on, with their values
 resolved like any other:
 
 ```go
-opts := composablejson.Options{HostDirectives: []string{"$csv"}}
+opts := compjson.Options{HostDirectives: []string{"$csv"}}
 ```
 
 Any other `$` key is an error, so a misspelled `$extned` fails loudly instead of
@@ -166,23 +167,23 @@ silently inheriting nothing.
 for hosts that address it with references such as `#iA/sine/rms`:
 
 ```go
-frag, _ := composablejson.ParseFragment("#iA/sine/rms")
+frag, _ := compjson.ParseFragment("#iA/sine/rms")
 p := append(slices.Clone(doc.Anchors()[frag.Anchor]), frag.Pointer...)
 // p is a JSON Pointer into doc.Value, such as /inputs/0/sine/rms
 ```
 
 ### Errors
 
-Every resolution error is a `*composablejson.Error` whose `Kind` is one of the
-`Err` variables, one for each error the specification lists. Each names the
-offending node's document and JSON Pointer; a cycle lists its full chain, and a
-duplicate anchor both places.
+Every resolution error is a `*compjson.Error` whose `Kind` is one of the `Err`
+variables, one for each error the specification lists. Each names the offending
+node's document and JSON Pointer; a cycle lists its full chain, and a duplicate
+anchor both places.
 
 ```go
-_, err := composablejson.Resolve(ctx, u, opts)
+_, err := compjson.Resolve(ctx, u, opts)
 switch {
-case errors.Is(err, composablejson.ErrCycle):
-	var e *composablejson.Error
+case errors.Is(err, compjson.ErrCycle):
+	var e *compjson.Error
 	errors.As(err, &e)
 	fmt.Println(e.Chain) // [file:///srv/a.json#/p file:///srv/b.json#/q file:///srv/a.json#/p]
 case errors.Is(err, fs.ErrNotExist):
@@ -192,8 +193,9 @@ case errors.Is(err, fs.ErrNotExist):
 
 ## Conformance
 
-The specification's language-neutral conformance suite is a git submodule at
-`testdata/composable-json`. Clone with it:
+The specification's language-neutral conformance suite comes from its own
+repository, a git submodule at `composable-json`, so the cases are in
+`composable-json/tests`. Clone with it:
 
 ```bash
 git clone --recurse-submodules https://github.com/bminer/composable-json-go
